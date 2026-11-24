@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <title>Mapa 5D GeoTIFF - Simulação de Chuva</title>
+  <style>
+    body { margin: 0; overflow: hidden; background: #111827; font-family: sans-serif; }
+    #status {
+      position: absolute; top: 12px; left: 12px; z-index: 10;
+      color: #e5e7eb; background: rgba(17, 24, 39, 0.85);
+      padding: 8px 12px; border-radius: 6px; font-size: 12px; line-height: 1.4;
+    }
+  </style>
+</head>
+<body>
+  <div id="status">Carregando modelo georreferenciado (terreno_web.json)...</div>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
+
+    const statusEl = document.getElementById('status');
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x111827);
+    const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 2000);
+    camera.position.set(0, -140, 110);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+
+    const light = new THREE.DirectionalLight(0xffffff, 1.6);
+    light.position.set(80, -80, 180);
+    scene.add(light, new THREE.AmbientLight(0x4b5563));
+
+    const resp = await fetch('./terreno_web.json');
+    const dados = await resp.json();
+
+    const largura = dados.largura;
+    const altura = dados.altura;
+    const minAlt = dados.min_alt;
+    const maxAlt = dados.max_alt;
+    const rangeAlt = Math.max(1.0, maxAlt - minAlt);
+
+    statusEl.innerHTML = `
+      <strong>Malha:</strong> ${largura}x${altura} | <strong>CRS:</strong> ${dados.crs || 'N/A'}<br>
+      <strong>Elevação:</strong> ${minAlt.toFixed(1)}m a ${maxAlt.toFixed(1)}m | Arraste para girar, scroll para zoom
+    `;
+
+    // Normaliza alturas para uma faixa visual confortável (0 a 45 unidades no Three.js)
+    const baseElevacao = new Float32Array(dados.elevacao);
+    const elevNorm = new Float32Array(baseElevacao.length);
+    for (let i = 0; i < baseElevacao.length; i++) {
+      elevNorm[i] = ((baseElevacao[i] - minAlt) / rangeAlt) * 45.0;
+    }
+
+    const varSuscept = new Float32Array(dados.variavel_5d);
+    const varDecliv = new Float32Array(dados.declividade_5d || dados.variavel_5d);
+
+    const params = {
+      intensidadeChuva: 0.7,
+      tempoSimulacao: 0.0,
+      exageroVertical: 1.0,
+      camada5D: 'Susceptibilidade'
+    };
+
+    const tamanhoPlano = 150;
+    const geometry = new THREE.PlaneGeometry(tamanhoPlano, tamanhoPlano, largura - 1, altura - 1);
+    const pos = geometry.attributes.position;
+    const colors = new Float32Array(pos.count * 3);
+
+    for (let i = 0; i < pos.count; i++) {
+      pos.setZ(i, elevNorm[i] * params.exageroVertical);
+    }
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    geometry.computeVertexNormals();
+
+    const material = new THREE.MeshStandardMaterial({
+      vertexColors: true,
+      roughness: 0.75,
+      metalness: 0.1
+    });
+    const terreno = new THREE.Mesh(geometry, material);
+    scene.add(terreno);
+
+    // Partículas de chuva (WebGL Points)
+    const chuvaCount = 9000;
+    const chuvaGeo = new THREE.BufferGeometry();
+    const chuvaPos = new Float32Array(chuvaCount * 3);
+    for (let i = 0; i < chuvaCount; i++) {
+      chuvaPos[i * 3] = (Math.random() - 0.5) * tamanhoPlano;
+      chuvaPos[i * 3 + 1] = (Math.random() - 0.5) * tamanhoPlano;
+      chuvaPos[i * 3 + 2] = Math.random() * 110;
+    }
+    chuvaGeo.setAttribute('position', new THREE.BufferAttribute(chuvaPos, 3));
+    const chuvaMat = new THREE.PointsMaterial({ color: 0x60a5fa, size: 0.7, transparent: true, opacity: 0.75 });
+    const sistemaChuva = new THREE.Points(chuvaGeo, chuvaMat);
+    scene.add(sistemaChuva);
+
+    const gui = new GUI();
+    gui.add(params, 'intensidadeChuva', 0, 2).name('Chuva (Intensidade)');
+    gui.add(params, 'tempoSimulacao', 0, 1).name('Tempo 4D (Acúmulo)').listen();
+    gui.add(params, 'exageroVertical', 0.2, 2.5).name('Escala Z (Relevo)');
+    gui.add(params, 'camada5D', ['Susceptibilidade', 'Declividade', 'Elevação']).name('Variável 5D');
+
+    function animate() {
+      requestAnimationFrame(animate);
+
+      if (params.intensidadeChuva > 0) {
+        params.tempoSimulacao = Math.min(1.0, params.tempoSimulacao + 0.0005 * params.intensidadeChuva);
+      }
+
+      const pChuva = chuvaGeo.attributes.position.array;
+      for (let i = 0; i < chuvaCount; i++) {
+        pChuva[i * 3 + 2] -= 1.6 * params.intensidadeChuva;
+        if (pChuva[i * 3 + 2] < 0) pChuva[i * 3 + 2] = 110;
+      }
+      chuvaGeo.attributes.position.needsUpdate = true;
+      sistemaChuva.visible = params.intensidadeChuva > 0.05;
+
+      const colAttr = geometry.attributes.color;
+      const nivelAguaNorm = params.tempoSimulacao * 28.0;
+
+      for (let i = 0; i < pos.count; i++) {
+        const zBase = elevNorm[i];
+        pos.setZ(i, zBase * params.exageroVertical);
+
+        if (zBase < nivelAguaNorm) {
+          const prof = Math.min(1, (nivelAguaNorm - zBase) / 10.0);
+          colAttr.setXYZ(i, 0.05, 0.35 - prof * 0.2, 0.85 + prof * 0.15);
+        } else if (params.camada5D === 'Susceptibilidade') {
+          const v = varSuscept[i];
+          colAttr.setXYZ(i, 0.2 + v * 0.72, 0.65 - v * 0.38, 0.22);
+        } else if (params.camada5D === 'Declividade') {
+          const d = varDecliv[i];
+          colAttr.setXYZ(i, 0.15 + d * 0.8, 0.55 - d * 0.35, 0.35);
+        } else {
+          const h = Math.min(1, zBase / 45.0);
+          colAttr.setXYZ(i, 0.22 + h * 0.55, 0.58 - h * 0.22, 0.22);
+        }
+      }
+
+      pos.needsUpdate = true;
+      colAttr.needsUpdate = true;
+      geometry.computeVertexNormals();
+
+      controls.update();
+      renderer.render(scene, camera);
+    }
+    animate();
+
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+  </script>
+</body>
+</html>
